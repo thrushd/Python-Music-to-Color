@@ -1,12 +1,13 @@
 import argparse
 import numpy as np
 import math
-from PIL import Image, ImageDraw
+from PIL import Image, ImageFilter
 from pathlib import Path
 import soundfile as sf
 import cv2
 from matplotlib import cm
-import scipy.signal
+import matplotlib.pyplot as plt
+from scipy import signal
 
 
 def get_arguments():
@@ -17,11 +18,12 @@ def get_arguments():
 
     parser.add_argument('file', type=str, help='path to the video file')
     parser.add_argument('-s', '--size', nargs=2, type=int, default=[1000, 1000], help='size of the image, in width height (1920 1080)')
+    parser.add_argument('-c', '--colormap', type=str, default='viridis', help='A matplotlib colormap name')
 
     return parser.parse_args()
 
 
-def generate_image(file_path, output_path, width, height):
+def generate_image(file_path, output_path, width, height, colormap):
     """
     Takes an audio file and generates an image.
     """
@@ -29,12 +31,13 @@ def generate_image(file_path, output_path, width, height):
     data, samplerate = sf.read(file_path)
 
     # create image and save
-    im = draw_bars(data, width, height)
+    im = draw_bars(data, width, height, colormap)
     # im = draw_circles(data, width, height)
-    im.save(str(output_path / file_path.parts[-1][:-4]) + '.png')
+    # im = im.filter(ImageFilter.GaussianBlur(radius=5))
+    im.save(str(output_path / file_path.parts[-1][:-4]) + '_' + colormap + '.png')
 
 
-def get_samples(data, num_samples):
+def get_abs_samples(data, num_samples):
     decimation = math.floor(len(data) / num_samples)
 
     samples = np.empty([0, 0])
@@ -43,33 +46,55 @@ def get_samples(data, num_samples):
         samples = np.append(samples, data[i * decimation][0])
 
     # shift up
-    samples = samples + abs(min(samples))
+    # samples = samples + abs(min(samples))
+    samples = abs(samples)
     # scale
-    samples = samples * (360 / max(samples))
+    samples = samples * (255 / max(samples))
 
-    return samples
+    return samples.astype(int)
 
 
-def get_colors(sound_samples):
+def get_colormap(color_map_name):
+    """
+    Get an array of colormap RBGA tuples from a matplotlib colormap name.
+    :param color_map_name: String of the supported colormap name.
+    :return: A list of RBGA tuples.
+    """
+    colors = cm.get_cmap(color_map_name)
+
+    color_map_array = []
+
+    for i in range(colors.N):
+        r = int(colors(i)[0]*256)
+        g = int(colors(i)[1]*256)
+        b = int(colors(i)[2]*256)
+
+        color_map_array.append((r, g, b, 255))
+
+    return color_map_array
+
+
+def get_colors(sound_samples, colormap):
     # TODO: add other modes for colors
     # get colors
-    # filtered_samples = scipy.signal.medfilt(sound_samples)
-    filtered_samples = sound_samples
-
+    color_map = get_colormap(colormap)
     color_list = []
-    for sample in filtered_samples:
-        color_list.append((int(sample), 100, 100))
+    for sample in sound_samples:
+        color_list.append(color_map[int(sample)])
 
     return color_list
 
 
-def draw_bars(data, width, height):
-    samples = get_samples(data, width)
-    colors = get_colors(samples)
-    im = Image.new('HSV', (width, 1))
+def draw_bars(data, width, height, colormap):
+    samples = get_abs_samples(data, width)
+    colors = get_colors(samples, colormap)
+
+    # plt.plot(samples)
+    # plt.show()
+
+    im = Image.new('RGBA', (width, 1))
     im.putdata(colors)
     im = im.resize((width, height))
-    im = im.convert('RGB')
     return im
 
 
@@ -83,7 +108,7 @@ def draw_circles(data, width, height):
 
     radius = math.floor(min([width, height]) / 2)  # for non square images
 
-    samples = get_samples(data, radius // line_thickness)
+    samples = get_abs_samples(data, radius // line_thickness)
     colors = get_colors(samples)
 
     im = np.zeros((width, height, 3), np.uint8)
@@ -114,5 +139,72 @@ def draw_circles(data, width, height):
 
 if __name__ == '__main__':
     args = get_arguments()
-    # output_path = Path('output')
-    # generate_image(Path(args.file), output_path, args.size[0], args.size[1])
+    output_path = Path('output')
+    # generate_image(Path(args.file), output_path, args.size[0], args.size[1], args.colormap)
+
+    width = args.size[0]
+    height = args.size[1]
+
+    data, sample_rate = sf.read(Path(args.file))
+
+    left_channel = data[:, 0]
+
+    window_width = height*2  # sampling window
+
+    sample_width = len(left_channel)//width
+    windows = np.linspace(0, len(left_channel)-sample_width, num=width, dtype=int)
+
+    color_map = get_colormap(args.colormap)
+
+    i = 0
+    pixels = []
+
+    for window_start in windows:
+
+        samples = left_channel[window_start:window_start + window_width]  # Get chunk
+
+        sample_fft = np.fft.fft(samples)  # get fft
+        mag = np.abs(sample_fft)  # get magnitudes
+        mag = mag[0:height]  # only positives
+        # print(type(np.max(mag)))
+
+        max_mag = float(np.max(mag))
+
+        if max_mag != 0.0:
+            mag = mag * (255 / max_mag)  # scale
+
+        mag = mag.astype(int)  # cast as int
+
+        # freqs = np.fft.fftfreq(window, d=1/sample_rate)  # get frequencies
+        # freqs = freqs[0:height]  # only positives
+
+        color_list = []
+        for sample in mag:
+            # print(sample)
+            color_list.append(color_map[int(sample)])
+
+        pixels.extend(color_list)
+        i += 1
+
+    im = Image.new('RGBA', (height, width))
+    print(len(pixels))
+    print(width*height)
+    im.putdata(pixels)
+    im.save('spectrum.png')
+
+    # plt.plot(freqs, mag)
+    # plt.show()
+    # print(len(mag))
+    # print(len(freqs))
+    # print('end')
+
+    # matplotlib
+    # Pxx, freqs, bins, im = plt.specgram(data[:, 0], Fs=samplerate, NFFT=4096, cmap=plt.get_cmap('magma'))
+    # plt.show()
+
+    # scipy
+    # frequencies, times, spectrogram = signal.spectrogram(data[:, 0], samplerate)
+    # # plt.imshow(spectrogram)
+    # plt.ylabel('Frequency [Hz]')
+    # plt.xlabel('Time [sec]')
+    # plt.show()
